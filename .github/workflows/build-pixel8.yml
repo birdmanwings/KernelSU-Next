@@ -1,0 +1,79 @@
+name: Build KernelSU LKM for Pixel 8
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: 'Kernel version'
+        required: true
+        default: '5.15.110'
+      kernel_branch:
+        description: 'Android kernel branch'
+        required: true
+        default: 'deprecated/android14-5.15-2024-06'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout KernelSU-Next
+        uses: actions/checkout@v4
+        
+      - name: Setup environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y repo git python3 python3-pip bc bison flex libssl-dev make
+          
+      - name: Download kernel source
+        run: |
+          mkdir android-kernel && cd android-kernel
+          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest \
+            -b common-android14-5.15-2024-06 --repo-rev=v2.16
+          repo sync -c -j$(nproc) --no-tags
+          
+      - name: Integrate KernelSU
+        run: |
+          cd android-kernel/common
+          ln -sf $GITHUB_WORKSPACE/kernel ./KernelSU
+          cd drivers
+          ln -sf ../KernelSU ./kernelsu
+          
+          # Modify Makefile
+          if ! grep -q "CONFIG_KSU" Makefile; then
+            echo "obj-\$(CONFIG_KSU) += kernelsu/" >> Makefile
+          fi
+          
+          # Modify Kconfig
+          if ! grep -q "KernelSU/Kconfig" Kconfig; then
+            sed -i '/source "drivers\/most\/Kconfig"/a source "drivers/KernelSU/Kconfig"' Kconfig
+          fi
+          
+      - name: Build kernelsu.ko
+        run: |
+          cd android-kernel
+          export LKM_BUILD=1
+          export KSUNAME="KernelSU-Next"
+          BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CONFIG_KSU=m
+          
+      - name: Upload kernelsu.ko
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernelsu-pixel8-${{ github.event.inputs.kernel_version }}
+          path: android-kernel/out/android14-5.15/dist/kernelsu.ko
+          
+      - name: Create release
+        if: success()
+        run: |
+          echo "## Build Info" > release.md
+          echo "- Kernel: ${{ github.event.inputs.kernel_version }}" >> release.md
+          echo "- Branch: ${{ github.event.inputs.kernel_branch }}" >> release.md
+          echo "- Device: Pixel 8" >> release.md
+          echo "- Build Date: $(date)" >> release.md
+          
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: build-${{ github.run_number }}
+          body_path: release.md
+          files: android-kernel/out/android14-5.15/dist/kernelsu.ko
